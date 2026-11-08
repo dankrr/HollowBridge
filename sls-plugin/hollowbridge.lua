@@ -11,20 +11,16 @@ for line in file:lines() do
     if key and value then cfg[key]=value end
 end
 file:close()
-local function tailscale_ip(value)
-    if not value then return false end
-    local a,b,c,d=value:match('^(%d+)%.(%d+)%.(%d+)%.(%d+)$')
-    a,b,c,d=tonumber(a),tonumber(b),tonumber(c),tonumber(d)
-    return a==100 and b and b>=64 and b<=127 and c and c<=255 and d and d<=255
-end
-local valid_device=cfg.DEVICE and cfg.DEVICE:match('^[%w_-]+$') and #cfg.DEVICE<=64
-local valid_peer=cfg.PEER_CLIENT_ID and cfg.PEER_CLIENT_ID:match('^[1-9]%d*$') and #cfg.PEER_CLIENT_ID<=20
+local valid_device=cfg.DEVICE=='desktop' or cfg.DEVICE=='deck'
+local valid_peer=not cfg.PEER or (#cfg.PEER<=253 and cfg.PEER:match('^[%w%.%-]+$'))
 local observe_native=cfg.OBSERVE_NATIVE=='1'
+local valid_client=cfg.PEER_CLIENT_ID and cfg.PEER_CLIENT_ID:match('^[1-9]%d*$') and #cfg.PEER_CLIENT_ID<=20
 local port=tonumber(cfg.PORT or '39482')
-if not tailscale_ip(cfg.BIND) or not tailscale_ip(cfg.PEER) or not valid_device or (observe_native and not valid_peer)
+if not valid_device or not valid_peer or (observe_native and not valid_client)
     or (cfg.OBSERVE_NATIVE and cfg.OBSERVE_NATIVE~='0' and cfg.OBSERVE_NATIVE~='1')
-    or (cfg.HOLLOW~='desktop' and cfg.HOLLOW~='decky') or not port or port%1~=0 or port<1 or port>65535 then
-    if log and log.warn then log.warn('[HollowBridge] invalid native config; agent not started') end
+    or (cfg.HOLLOW~='desktop' and cfg.HOLLOW~='decky')
+    or not port or port%1~=0 or port<1 or port>65535 then
+    if log and log.warn then log.warn('[HollowBridge] invalid config; agent not started') end
     return
 end
 local f=io.open('/proc/self/stat','r');local raw=f and f:read('*l');if f then f:close() end
@@ -39,10 +35,11 @@ if not exists(project..'/hollowbridge/__main__.py') then
     if log and log.warn then log.warn('[HollowBridge] agent package missing') end;return
 end
 local clean='/usr/bin/env -u LD_AUDIT -u LD_PRELOAD -u LD_LIBRARY_PATH '
-local args='/usr/bin/python3 -m hollowbridge serve --bind '..q(cfg.BIND)..' --peer '..q(cfg.PEER)
+local args='/usr/bin/python3 -m hollowbridge serve --bind 0.0.0.0'
     ..' --device '..q(cfg.DEVICE)..' --hollow '..q(cfg.HOLLOW)..' --port '..q(port)
-    ..' --observe-sync'
+    ..' --key-file '..q(home..'/.config/hollowbridge/pairing.key')
     ..' --steam-pid '..q(pid)..' --steam-start '..q(start)
+if cfg.PEER then args=args..' --peer '..q(cfg.PEER) end
 if observe_native then args=args..' --observe-native --peer-client-id '..q(cfg.PEER_CLIENT_ID) end
 -- Stock SLSsteam has no onTick supervisor. Use the already-running user
 -- service manager for a transient unit; it adds no always-on supervisor.

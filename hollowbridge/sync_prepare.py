@@ -5,8 +5,6 @@ source evidence and local visibility, not RemotePlaySync's internal snapshot.
 """
 import time
 import re
-import json
-import urllib.request
 from pathlib import Path
 from .journal import Journal
 
@@ -122,21 +120,22 @@ class PreparationQueue:
         return True
 
 
-def run_independent_observer(app, peer, port, stop):
+def run_independent_observer(app, discovery, port, stop):
     """Poll the authenticated source; wait for local Steam visibility before preparation.
 
     This observes independent source registrations and local visibility. It does
     not read or assert RemotePlaySync's internal acceptance state.
     """
-    from .service import tailscale_identity
+    from .transport import request
     queue=PreparationQueue(app.state_dir/'sync-preparation.sqlite3')
-    opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
     while not stop.is_set():
         try:
-            if not app.ready() or tailscale_identity(peer)!=app.peer:
+            if not app.ready():
                 stop.wait(10);continue
-            with opener.open(f'http://{peer}:{port}/sync-candidates',timeout=6) as response:
-                data=json.load(response)
+            peer=discovery.find()
+            if not peer:
+                stop.wait(10);continue
+            data=request(peer,port,app.key,'/sync-candidates')
             candidates=data['appids']
             queue.observe('configured-peer',0,int(time.time()*1000),candidates)
             current=set(candidates)

@@ -9,9 +9,14 @@ state="$HOME/.local/state/hollowbridge"
 cache="$HOME/.cache/hollowbridge"
 fail() { printf '%s\n' "$*" >&2; exit 1; }
 
-[[ $# -ge 1 ]] || fail 'Usage: ./install.sh install desktop|deck PEER_TAILSCALE_IP  |  update  |  uninstall'
+[[ $# -ge 1 ]] || fail 'Usage: ./install.sh pair-code | install desktop|deck | update | uninstall'
 action=$1
-[[ $action == install || $action == update || $action == uninstall ]] || fail 'Unknown action.'
+[[ $action == pair-code || $action == install || $action == update || $action == uninstall ]] || fail 'Unknown action.'
+if [[ $action == pair-code ]]; then
+    [[ $# == 1 ]] || fail 'Usage: ./install.sh pair-code'
+    python3 -c 'import secrets; print(secrets.token_hex(32))'
+    exit 0
+fi
 if pgrep -u "$(id -u)" -x steam >/dev/null; then
     fail 'Exit Steam completely before installing, updating, or uninstalling HollowBridge.'
 fi
@@ -34,7 +39,7 @@ if [[ $action == uninstall ]]; then
     exit 0
 fi
 
-for cmd in python3 node tailscale systemctl install pgrep; do
+for cmd in python3 node systemctl install pgrep; do
     command -v "$cmd" >/dev/null || fail "Missing dependency: $cmd"
 done
 node -e 'if (typeof WebSocket !== "function" || typeof fetch !== "function") process.exit(1)' || fail 'Node.js needs built-in fetch and WebSocket support (Node 22 or newer).'
@@ -43,8 +48,8 @@ node -e 'if (typeof WebSocket !== "function" || typeof fetch !== "function") pro
 [[ ! -L $project && ! -L $config && ! -L $plugin ]] || fail 'A destination path is a symlink; inspect it first.'
 
 if [[ $action == install ]]; then
-    [[ $# == 3 ]] || fail 'Usage: ./install.sh install desktop|deck PEER_TAILSCALE_IP'
-    role=$2 peer=$3
+    [[ $# == 2 ]] || fail 'Usage: ./install.sh install desktop|deck'
+    role=$2
     [[ $role == desktop || $role == deck ]] || fail 'Choose desktop or deck.'
     [[ ! -e $project && ! -e $config && ! -e $plugin ]] || fail 'HollowBridge files already exist. Back them up and use update, or inspect them first.'
     if [[ $role == desktop ]]; then
@@ -54,34 +59,39 @@ if [[ $action == install ]]; then
         kind=decky
         [[ -d $HOME/homebrew/plugins/hollow-decky ]] || fail 'Hollow Decky backend not found.'
     fi
-    bind=$(tailscale ip -4 | head -n 1)
-    python3 - "$bind" "$peer" <<'PY'
-import ipaddress, sys
-try:
-    local, peer = (ipaddress.ip_address(x) for x in sys.argv[1:])
-    network = ipaddress.ip_network('100.64.0.0/10')
-    if local.version != 4 or peer.version != 4 or local not in network or peer not in network or local == peer:
-        raise ValueError
-except ValueError:
-    raise SystemExit('Use distinct Tailscale IPv4 addresses for this device and its peer.')
-PY
+    read -r -s -p 'Pairing code (same on both devices): ' pairing_code
+    printf '\n'
+    [[ $pairing_code =~ ^[0-9a-f]{64}$ ]] || fail 'Invalid pairing code.'
     install -d -m 700 "$config" "$HOME/.local/share" "$project"
     cp -R -- "$source_dir/hollowbridge" "$project/"
     chmod 700 "$project"
     umask 077
-    printf 'BIND=%s\nPEER=%s\nDEVICE=%s\nHOLLOW=%s\nPORT=39482\n' "$bind" "$peer" "$role" "$kind" > "$config/native.conf"
+    printf '%s\n' "$pairing_code" > "$config/pairing.key"
+    unset pairing_code
+    printf 'DEVICE=%s\nHOLLOW=%s\nPORT=39482\n' "$role" "$kind" > "$config/native.conf"
     install -m 600 "$source_dir/sls-plugin/hollowbridge.lua" "$plugin"
-    printf '%s\n' 'Installed. Start Steam normally; repeat the install on the other device with this device’s Tailscale IP.'
+    printf '%s\n' 'Installed. Repeat on the other device with the same pairing code, then start Steam.'
 else
     [[ $# == 1 ]] || fail 'Usage: ./install.sh update'
     [[ -f $project/hollowbridge/__main__.py && -f $config/native.conf && -f $plugin ]] || fail 'HollowBridge installation is incomplete; inspect it first.'
     grep -Fq -- '-- HollowBridge agent launcher.' "$plugin" || fail 'The plugin is not a recognized HollowBridge launcher.'
+    if [[ ! -f $config/pairing.key ]]; then
+        read -r -s -p 'New pairing code (same on both devices): ' pairing_code
+        printf '\n'
+        [[ $pairing_code =~ ^[0-9a-f]{64}$ ]] || fail 'Invalid pairing code.'
+    fi
     backup_root="$HOME/.local/share/hollowbridge-backups"
     install -d -m 700 "$backup_root"
     backup=$(mktemp -d "$backup_root/update.XXXXXXXX")
     cp -a -- "$project" "$backup/project"
     cp -a -- "$plugin" "$backup/hollowbridge.lua"
     cp -a -- "$config" "$backup/config"
+    if [[ -n ${pairing_code:-} ]]; then
+        umask 077
+        printf '%s\n' "$pairing_code" > "$config/pairing.key"
+        unset pairing_code
+        sed -i '/^BIND=/d; /^PEER=/d' "$config/native.conf"
+    fi
     cp -R -- "$source_dir/hollowbridge/." "$project/hollowbridge/"
     install -m 600 "$source_dir/sls-plugin/hollowbridge.lua" "$plugin"
     printf 'Updated. Configuration and state were kept; backup: %s\n' "$backup"

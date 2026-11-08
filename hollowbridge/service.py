@@ -1,5 +1,4 @@
-"""A small Tailscale-only receiver. No Steam debugging endpoint is exposed."""
-import ipaddress
+"""Authenticated peer receiver. No Steam debugging endpoint is exposed."""
 import json
 import os
 import re
@@ -7,7 +6,6 @@ import socket
 import socketserver
 import struct
 import stat
-import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -16,18 +14,11 @@ from urllib.parse import urlsplit
 from urllib.request import build_opener, ProxyHandler
 
 from . import adapter
+from .transport import Challenges, Discovery, mac
+import hmac
 from .journal import Journal, Conflict
 from .manifest import parse_vdf, inspect_manifest
 from .catalog import games
-
-
-def tailscale_identity(ip):
-    address = ipaddress.ip_address(ip)
-    if address.version != 4 or address not in ipaddress.ip_network('100.64.0.0/10'):
-        raise ValueError('not a Tailscale address')
-    p = subprocess.run(['tailscale', 'whois', '--json', str(address)], capture_output=True, text=True, timeout=5, check=True)
-    result = json.loads(p.stdout)
-    return result['Node']['StableID']
 
 
 def process_identity_alive(pid, start):
@@ -86,10 +77,12 @@ def reconcile_native_request(app, row, now=None):
 
 
 class Application:
-    def __init__(self, state, device, peer, hollow_kind, ops=adapter, authenticate=tailscale_identity, ready=steam_available):
+    def __init__(self, state, device, peer, hollow_kind, ops=adapter, authenticate=None, ready=steam_available, key=None):
         self.device, self.peer, self.hollow_kind = device, peer, hollow_kind
         self.state_dir=Path(state)
         self.ops, self.authenticate, self.ready = ops, authenticate, ready
+        self.key = key
+        self.challenges = Challenges()
         Path(state).mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(state, 0o700)
         self.journal=Journal(Path(state)/'requests.sqlite3')
@@ -222,14 +215,29 @@ def make_handler(app):
             finally: app.end()
         def log_message(self, *_): pass
         def response(self, code, obj):
-            raw=json.dumps(obj,separators=(',',':')).encode();self.send_response(code);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
-        def authorized(self):
+            raw=json.dumps(obj,separators=(',',':')).encode()
+            self.send_response(code)
+            self.send_header('Content-Type','application/json')
+            self.send_header('Content-Length',str(len(raw)))
+            if getattr(self, 'auth_nonce', None):
+                self.send_header('X-HollowBridge-Auth', mac(app.key, 'response', self.auth_nonce, str(code), raw))
+            self.end_headers()
+            self.wfile.write(raw)
+        def authorized(self, body=b''):
             if self.connection.family == socket.AF_UNIX:
                 try: return struct.unpack('3i',self.connection.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))[1]==os.getuid()
                 except OSError: return False
-            try: return app.authenticate(self.client_address[0]) == app.peer
-            except Exception: return False
+            nonce = self.headers.get('X-HollowBridge-Nonce', '')
+            signature = self.headers.get('X-HollowBridge-Auth', '')
+            if not app.key or not app.challenges.consume(nonce): return False
+            expected = mac(app.key, 'request', nonce, self.command, self.path, body)
+            if not hmac.compare_digest(signature, expected): return False
+            self.auth_nonce = nonce
+            return True
         def do_GET(self):
+            if self.path == '/challenge' and self.connection.family != socket.AF_UNIX:
+                nonce = app.challenges.issue()
+                return self.response(200, {'nonce':nonce}) if nonce else self.response(503, {'error':'busy'})
             if not self.authorized(): return self.response(403,{'error':'unauthorized'})
             path=urlsplit(self.path).path
             if path=='/health': return self.response(200,{'device':app.device,'available':True,'steam_available':app.ready(),'hollow_adapter':app.hollow_kind})
@@ -244,12 +252,13 @@ def make_handler(app):
             status=app.status(match.group(1))
             return self.response(200,status) if status else self.response(404,{'error':'not found'})
         def do_POST(self):
-            if not self.authorized(): return self.response(403,{'error':'unauthorized'})
-            if self.path not in ('/requests','/native-events'): return self.response(404,{'error':'not found'})
             try:
                 n=int(self.headers.get('Content-Length','0'))
                 if not 1 <= n <= 4096: raise ValueError('invalid body size')
-                body=json.loads(self.rfile.read(n))
+                raw=self.rfile.read(n)
+                if not self.authorized(raw): return self.response(403,{'error':'unauthorized'})
+                if self.path not in ('/requests','/native-events'): return self.response(404,{'error':'not found'})
+                body=json.loads(raw)
                 if not isinstance(body,dict): raise ValueError('invalid body')
                 result=app.submit_native(body) if self.path=='/native-events' else app.submit(body)
                 return self.response(202,result)
@@ -262,72 +271,32 @@ class LocalServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     daemon_threads=True
 
 
-def _activated_sockets(bind,port,app):
-    if os.environ.get('LISTEN_PID')!=str(os.getpid()) or os.environ.get('LISTEN_FDS')!='2':
-        raise ValueError('expected two systemd-activated listening sockets')
-    for name in ('LISTEN_PID','LISTEN_FDS','LISTEN_FDNAMES'):os.environ.pop(name,None)
-    inet=unix=None
-    for fd in (3,4):
-        sock=socket.socket(fileno=fd)
-        if sock.getsockopt(socket.SOL_SOCKET,socket.SO_ACCEPTCONN)!=1:raise ValueError('activation fd is not listening')
-        if sock.family==socket.AF_INET:
-            device=sock.getsockopt(socket.SOL_SOCKET,socket.SO_BINDTODEVICE,32).rstrip(b'\0')
-            if sock.getsockname()!=(bind,port) or device!=b'tailscale0' or inet:raise ValueError('unsafe activated network socket')
-            inet=sock
-        elif sock.family==socket.AF_UNIX:
-            path=app.state_dir/'agent.sock'
-            if sock.getsockname()!=str(path) or unix:raise ValueError('unsafe activated local socket')
-            info=path.lstat()
-            if not stat.S_ISSOCK(info.st_mode) or info.st_uid!=os.getuid() or info.st_mode&0o077:raise ValueError('unsafe local socket permissions')
-            unix=sock
-        else: raise ValueError('unexpected activation socket')
-    if not inet or not unix:raise ValueError('missing activation socket')
-    return inet,unix
-
-
-def serve(bind,port,app,activated=False,idle_seconds=120,observer=None,steam_identity=None,sync_peer=None):
-    address=ipaddress.ip_address(bind)
-    if address.version!=4 or address not in ipaddress.ip_network('100.64.0.0/10'):
-        raise ValueError('agent must bind to its Tailscale IPv4 address')
-    own = subprocess.run(['tailscale','ip','-4'], capture_output=True, text=True, check=True, timeout=5).stdout.split()
-    if bind not in own: raise ValueError('bind address is not this device’s Tailscale IP')
-    class TailnetServer(ThreadingHTTPServer):
-        def server_bind(self):
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b'tailscale0\0')
-            super().server_bind()
+def serve(bind,port,app,steam_identity=None,sync_peer=None,observer=None):
+    server=ThreadingHTTPServer((bind,port),make_handler(app))
+    discovery=Discovery(app.key, app.device, port, sync_peer)
     socket_path=app.state_dir/'agent.sock'
-    if activated:
-        inet,unix=_activated_sockets(bind,port,app)
-        server=TailnetServer((bind,port),make_handler(app),bind_and_activate=False)
-        server.socket.close();server.socket=inet;server.server_address=inet.getsockname()
-        server.server_name=bind;server.server_port=port
-        local=LocalServer(str(socket_path),make_handler(app),bind_and_activate=False)
-        local.socket.close();local.socket=unix;local.server_address=str(socket_path)
-    else:
-        server=TailnetServer((bind,port),make_handler(app))
-        if socket_path.exists() or socket_path.is_symlink():
-            info=socket_path.lstat()
-            if not stat.S_ISSOCK(info.st_mode) or info.st_uid!=os.getuid(): raise ValueError('unsafe local socket path')
-            socket_path.unlink()
-        local=LocalServer(str(socket_path),make_handler(app));os.chmod(socket_path,0o600)
+    if socket_path.exists() or socket_path.is_symlink():
+        info=socket_path.lstat()
+        if not stat.S_ISSOCK(info.st_mode) or info.st_uid!=os.getuid(): raise ValueError('unsafe local socket path')
+        socket_path.unlink()
+    local=LocalServer(str(socket_path),make_handler(app));os.chmod(socket_path,0o600)
     threading.Thread(target=local.serve_forever,daemon=True).start()
     stop_event=threading.Event()
-    if sync_peer:
-        from .sync_prepare import run_independent_observer
-        def supervise_sync():
-            while not stop_event.is_set():
-                try:run_independent_observer(app,sync_peer,port,stop_event)
-                except Exception as error:
-                    print('HollowBridge preparation observer stopped:',type(error).__name__,flush=True)
-                    if stop_event.wait(5):return
-        threading.Thread(target=supervise_sync,daemon=True).start()
+    from .sync_prepare import run_independent_observer
+    def supervise_sync():
+        while not stop_event.is_set():
+            try:run_independent_observer(app,discovery,port,stop_event)
+            except Exception as error:
+                print('HollowBridge preparation observer stopped:',type(error).__name__,flush=True)
+                if stop_event.wait(5):return
+    threading.Thread(target=supervise_sync,daemon=True).start()
     if observer:
         from .native import run_observer
         def supervise_observer():
             while not stop_event.is_set():
-                try:run_observer(str(app.state_dir),app.device,observer['peer'],port,observer['client_id'],stop_event,observer.get('log'))
+                try:run_observer(str(app.state_dir),app.device,discovery,port,app.key,observer['client_id'],stop_event,observer.get('log'))
                 except Exception as error:
-                    print('HollowBridge observer stopped:',type(error).__name__,flush=True)
+                    print('HollowBridge native observer stopped:',type(error).__name__,flush=True)
                     if stop_event.wait(5):return
         threading.Thread(target=supervise_observer,daemon=True).start()
     def reconcile_native():
@@ -344,16 +313,9 @@ def serve(bind,port,app,activated=False,idle_seconds=120,observer=None,steam_ide
                 if not process_identity_alive(pid,start):break
             if not stop_event.is_set():server.shutdown()
         threading.Thread(target=check_steam,daemon=True).start()
-    if activated and not observer and not sync_peer:
-        def idle_monitor():
-            while True:
-                time.sleep(2)
-                with app.activity_lock:
-                    idle=app.active==0 and time.monotonic()-app.last_activity>=idle_seconds
-                if idle:server.shutdown();return
-        threading.Thread(target=idle_monitor,daemon=True).start()
     try: server.serve_forever()
     finally:
         stop_event.set()
         local.shutdown();local.server_close();server.server_close()
-        if not activated:socket_path.unlink(missing_ok=True)
+        discovery.close()
+        socket_path.unlink(missing_ok=True)

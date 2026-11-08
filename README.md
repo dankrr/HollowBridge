@@ -14,9 +14,8 @@ family, free, or temporary licenses may be uncertain.
 
 On both devices, install and configure SLSsteam with plugins enabled,
 [RemotePlaySync](https://github.com/dankrr/slssteam-remote-play-sync), Python 3,
-Node.js 22 or newer, systemd user services, and Tailscale. Enable Steam Remote
-Play and ensure the devices can reach one another over Tailscale. Install Hollow
-Desktop on the Linux desktop and Hollow Decky on the Steam Deck.
+Node.js 22 or newer, and systemd user services. Enable Steam Remote Play.
+Install Hollow Desktop on the Linux desktop and Hollow Decky on the Steam Deck.
 
 Steam's local debugging interface must be enabled on both devices. With Steam
 fully closed, create the marker below, then start Steam and check that
@@ -30,34 +29,45 @@ This interface gives local software powerful access to Steam; enable it only
 on devices where you trust the local software. HollowBridge does not expose it
 over the network.
 
-## Install and configure
+## Install and pair
 
-On each device, find its Tailscale IPv4 address with `tailscale ip -4`. Clone
-this repository on both devices. **Exit Steam completely** before running the
-installer:
+Connect both devices to the same local network and clone this repository on
+each. Create a pairing code on either device and share it privately with the
+other device:
 
 ```sh
 git clone https://github.com/dankrr/HollowBridge.git
 cd HollowBridge
-
-# On the desktop, use the Deck's Tailscale IP:
-./install.sh install desktop DECK_TAILSCALE_IP
-
-# On the Deck, use the desktop's Tailscale IP instead:
-./install.sh install deck DESKTOP_TAILSCALE_IP
+./install.sh pair-code
 ```
 
-Run only the command for the device you are configuring. Start Steam normally
-on both devices. The plugin starts the companion with Steam; the devices
-authenticate through Tailscale. Hollow API keys and Steam credentials stay on
-their respective devices.
+**Exit Steam completely** on each device, then run the matching command from
+its repository directory. Enter the same pairing code on both:
 
-If an address changes, exit Steam and update `BIND` (this device) or `PEER`
-(the other device) in `~/.config/hollowbridge/native.conf`, then start Steam.
+```sh
+# Linux desktop:
+./install.sh install desktop
+
+# Steam Deck:
+./install.sh install deck
+```
+
+Start Steam normally on both devices. HollowBridge discovers its paired peer
+on the LAN and authenticates each request. Allow TCP and UDP port 39482 through
+local firewalls; networks with client isolation or blocked broadcasts can
+prevent discovery.
+
+Requests are authenticated but not encrypted: game IDs and status can be
+visible to others on the network. For private communication across networks,
+use a trusted encrypted VPN, then add `PEER=hostname-or-ipv4` to
+`~/.config/hollowbridge/native.conf` on each device with the other device's VPN
+IPv4 address or hostname. Restart Steam after changing the configuration. HollowBridge does not
+need a particular VPN. Keep the pairing code private; anyone with it can act as
+your peer. Hollow API keys and Steam credentials are not sent to the peer.
 
 ## Update or uninstall
 
-Exit Steam completely on the device first. From its repository directory:
+Exit Steam completely on each device. From its repository directory:
 
 ```sh
 git pull
@@ -66,9 +76,12 @@ git pull
 ./install.sh uninstall
 ```
 
-Updates retain configuration and state and save a backup under
-`~/.local/share/hollowbridge-backups`. Uninstall leaves those backups, other
-plugins, Hollow game data, and Steam's debugging setting in place.
+When updating from the older Tailscale-only version, generate a pairing code
+with `./install.sh pair-code` and enter the same code during the update on both
+devices. Update both devices before starting Steam again. The existing queue is
+kept. Updates save a backup under `~/.local/share/hollowbridge-backups`.
+Uninstall leaves those backups, other plugins, Hollow game data, and Steam's
+debugging setting in place.
 
 Steam's local debugging and Decky interfaces may change with updates. Earlier
 remote installs sometimes showed a timeout despite completing the download;
