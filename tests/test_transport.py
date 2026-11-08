@@ -5,7 +5,31 @@ import threading
 import unittest
 from http.server import ThreadingHTTPServer
 from hollowbridge.service import Application, make_handler
-from hollowbridge.transport import mac, request
+from hollowbridge.transport import load_key, mac, request
+
+
+class ExistingPeerKeyTest(unittest.TestCase):
+    def test_reciprocal_remoteplaysync_configuration(self):
+        import os
+        from pathlib import Path
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'rps.conf'
+            def write(device, peer, key):
+                path.write_text(f'DEVICE_ID={device}\nPEER_ID={peer}\nPSK_HEX={key}\n')
+                path.chmod(0o600)
+            env = {'SLS_RPS_CONFIG':str(path)}
+            with patch.dict(os.environ, env, clear=True):
+                write('a'*32,'b'*32,'c'*64)
+                first = load_key()
+                write('b'*32,'a'*32,'c'*64)
+                self.assertEqual(first, load_key())
+                write('b'*32,'a'*32,'d'*64)
+                self.assertNotEqual(first, load_key())
+                write('b'*32,'e'*32,'c'*64)
+                self.assertNotEqual(first, load_key())
+                path.chmod(0o644)
+                with self.assertRaises(ValueError): load_key()
 
 
 class TransportTest(unittest.TestCase):

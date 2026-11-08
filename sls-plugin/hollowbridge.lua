@@ -37,7 +37,6 @@ end
 local clean='/usr/bin/env -u LD_AUDIT -u LD_PRELOAD -u LD_LIBRARY_PATH '
 local args='/usr/bin/python3 -m hollowbridge serve --bind 0.0.0.0'
     ..' --device '..q(cfg.DEVICE)..' --hollow '..q(cfg.HOLLOW)..' --port '..q(port)
-    ..' --key-file '..q(home..'/.config/hollowbridge/pairing.key')
     ..' --steam-pid '..q(pid)..' --steam-start '..q(start)
 if cfg.PEER then args=args..' --peer '..q(cfg.PEER) end
 if observe_native then args=args..' --observe-native --peer-client-id '..q(cfg.PEER_CLIENT_ID) end

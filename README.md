@@ -29,20 +29,20 @@ This interface gives local software powerful access to Steam; enable it only
 on devices where you trust the local software. HollowBridge does not expose it
 over the network.
 
-## Install and pair
+## Install
 
-Connect both devices to the same local network and clone this repository on
-each. Create a pairing code on either device and share it privately with the
-other device:
+Connect both devices to the same local network. Configure RemotePlaySync on
+both devices first; HollowBridge uses its existing peer configuration to
+authenticate, so no additional pairing code is needed. Clone this repository
+on each device:
 
 ```sh
 git clone https://github.com/dankrr/HollowBridge.git
 cd HollowBridge
-./install.sh pair-code
 ```
 
 **Exit Steam completely** on each device, then run the matching command from
-its repository directory. Enter the same pairing code on both:
+its repository directory:
 
 ```sh
 # Linux desktop:
@@ -52,8 +52,8 @@ its repository directory. Enter the same pairing code on both:
 ./install.sh install deck
 ```
 
-Start Steam normally on both devices. HollowBridge discovers its paired peer
-on the LAN and authenticates each request. Allow TCP and UDP port 39482 through
+Start Steam normally on both devices. HollowBridge discovers the configured
+RemotePlaySync peer on the LAN and authenticates each request. Allow TCP and UDP port 39482 through
 local firewalls; networks with client isolation or blocked broadcasts can
 prevent discovery.
 
@@ -62,8 +62,8 @@ visible to others on the network. For private communication across networks,
 use a trusted encrypted VPN, then add `PEER=hostname-or-ipv4` to
 `~/.config/hollowbridge/native.conf` on each device with the other device's VPN
 IPv4 address or hostname. Restart Steam after changing the configuration. HollowBridge does not
-need a particular VPN. Keep the pairing code private; anyone with it can act as
-your peer. Hollow API keys and Steam credentials are not sent to the peer.
+need a particular VPN. Hollow API keys and Steam credentials are not sent to
+the peer.
 
 ## Update or uninstall
 
@@ -76,12 +76,15 @@ git pull
 ./install.sh uninstall
 ```
 
-When updating from the older Tailscale-only version, generate a pairing code
-with `./install.sh pair-code` and enter the same code during the update on both
-devices. Update both devices before starting Steam again. The existing queue is
-kept. Updates save a backup under `~/.local/share/hollowbridge-backups`.
-Uninstall leaves those backups, other plugins, Hollow game data, and Steam's
-debugging setting in place.
+Update both devices before starting Steam again. The existing queue is kept.
+Updates save a backup under `~/.local/share/hollowbridge-backups`. Uninstall
+leaves those backups, other plugins, Hollow game data, and Steam's debugging
+setting in place.
+
+HollowBridge reads RemotePlaySync's existing peer IDs and secret from its
+owner-only configuration file (or the corresponding `SLS_RPS_` environment
+variables). Pairing in Steam alone does not authenticate a separate LAN
+connection; RemotePlaySync must have matching peer settings on both devices.
 
 Steam's local debugging and Decky interfaces may change with updates. Earlier
 remote installs sometimes showed a timeout despite completing the download;

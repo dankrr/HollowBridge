@@ -3,6 +3,9 @@ import hashlib
 import hmac
 import http.client
 import json
+import os
+import re
+import stat
 import secrets
 import socket
 import threading
@@ -16,12 +19,44 @@ def mac(key, *parts):
     return hmac.new(key, b'\0'.join(p if isinstance(p, bytes) else str(p).encode() for p in parts), hashlib.sha256).hexdigest()
 
 
-def load_key(path):
-    with open(path, 'r', encoding='ascii') as f:
-        value = f.read().strip()
-    if len(value) != 64 or any(c not in '0123456789abcdef' for c in value):
-        raise ValueError('invalid pairing key')
-    return bytes.fromhex(value)
+def load_key():
+    """Derive a separate key from RemotePlaySync's existing peer configuration."""
+    explicit = os.environ.get('SLS_RPS_CONFIG')
+    config_home = os.environ.get('XDG_CONFIG_HOME') or os.path.join(os.path.expanduser('~'), '.config')
+    path = explicit or os.path.join(config_home, 'SLSsteam', 'remote_play_sync.conf')
+    values = {}
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        if explicit:
+            raise ValueError('RemotePlaySync configuration not found') from None
+    else:
+        with os.fdopen(fd, 'r', encoding='utf-8') as f:
+            info = os.fstat(f.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077 or info.st_size > 16384:
+                raise ValueError('RemotePlaySync configuration must be an owner-only regular file')
+            text = f.read(16385)
+            if len(text) > 16384:
+                raise ValueError('RemotePlaySync configuration is too large')
+            for line in text.splitlines():
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                match = re.fullmatch(r'([A-Z0-9_]+)\s*=\s*(.*?)\s*', line)
+                if not match:
+                    raise ValueError('invalid RemotePlaySync configuration')
+                value = match.group(2)
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                    value = value[1:-1]
+                values[match.group(1)] = value
+    def setting(name):
+        return os.environ.get('SLS_RPS_' + name) or values.get(name, '')
+    local, peer, secret = (setting(name).lower() for name in ('DEVICE_ID', 'PEER_ID', 'PSK_HEX'))
+    if not re.fullmatch(r'[0-9a-f]{32}', local) or not re.fullmatch(r'[0-9a-f]{32}', peer) or local == peer or not re.fullmatch(r'[0-9a-f]{64}', secret):
+        raise ValueError('RemotePlaySync peer configuration is missing or invalid')
+    # Keep HollowBridge's authentication independent from the RPS protocol.
+    context = b'hollowbridge-lan-v1\0' + bytes.fromhex(''.join(sorted((local, peer))))
+    return hmac.new(bytes.fromhex(secret), context, hashlib.sha256).digest()
 
 
 class Challenges:
