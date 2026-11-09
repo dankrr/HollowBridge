@@ -155,11 +155,23 @@ class HollowBridgeLuaStateMachineTest(unittest.TestCase):
             script = f"""
 HOLLOWBRIDGE_TEST_MODE = true
 local spawned = {{}}
+SLS = {{
+    config = {{
+        getIntList = function(_, key)
+            if key == "AdditionalPackageApps" then
+                -- App 400 was injected into Pkg 0 by SLSsteam, so user:isSubscribed(400) returns true,
+                -- but HollowBridge must recognize it as Hollow-managed rather than genuine_owned.
+                return {{ 400 }}
+            end
+            return {{}}
+        end,
+    }},
+}}
 HOLLOWBRIDGE_TEST_USER = {{
     loggedOn = true,
     isSubscribed = function(_, appId)
-        -- App 200 is genuinely owned on Steam
-        return appId == 200
+        -- App 200 is genuinely owned on Steam; App 400 is in Pkg 0 via AdditionalPackageApps
+        return appId == 200 or appId == 400
     end,
 }}
 HOLLOWBRIDGE_TEST_SPAWN = function(args, statusFile)

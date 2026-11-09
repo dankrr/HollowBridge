@@ -7,6 +7,7 @@ state="$HOME/.local/state/hollowbridge"
 cache="$HOME/.cache/hollowbridge"
 legacy_project="$HOME/.local/share/hollowbridge"
 legacy_config="$HOME/.config/hollowbridge"
+legacy_unit="$HOME/.config/systemd/user/hollowbridge-steam.service"
 
 fail() { printf '%s\n' "$*" >&2; exit 1; }
 
@@ -15,6 +16,27 @@ is_hollowbridge_plugin() {
         grep -Fq -- '-- HollowBridge SLSsteam plugin.' "$1" ||
         grep -Fq -- '-- HollowBridge agent launcher.' "$1"
     )
+}
+
+stop_legacy_agent() {
+    if command -v systemctl >/dev/null; then
+        systemctl --user stop hollowbridge-steam.service 2>/dev/null || true
+        systemctl --user disable hollowbridge-steam.service 2>/dev/null || true
+    fi
+    pkill -u "$(id -u)" -f 'python3.*-m hollowbridge(\.service)? serve' 2>/dev/null || true
+    rm -f -- "$legacy_unit" \
+        "$state/agent.lock" \
+        "$state/agent.sock" \
+        "$state/native-agent.pid" \
+        "$state/requests.sqlite3" \
+        "$state/requests.sqlite3-shm" \
+        "$state/requests.sqlite3-wal" \
+        "$state/sync-preparation.sqlite3" \
+        "$state/sync-preparation.sqlite3-shm" \
+        "$state/sync-preparation.sqlite3-wal"
+    if command -v systemctl >/dev/null; then
+        systemctl --user daemon-reload 2>/dev/null || true
+    fi
 }
 
 check_hollow_backend() {
@@ -41,19 +63,13 @@ check_hollow_backend() {
 action=$1
 [[ $action == install || $action == update || $action == uninstall ]] || fail 'Unknown action.'
 
-if pgrep -u "$(id -u)" -x steam >/dev/null; then
-    fail 'Exit Steam completely before installing, updating, or uninstalling HollowBridge.'
-fi
-if command -v systemctl >/dev/null && systemctl --user is-active --quiet hollowbridge-steam.service; then
-    systemctl --user stop hollowbridge-steam.service || fail 'The legacy HollowBridge agent is still running.'
-fi
-
 if [[ $action == uninstall ]]; then
     [[ $# == 1 ]] || fail 'Usage: ./install.sh uninstall'
     [[ ! -L $plugin && ! -L $state && ! -L $cache && ! -L $legacy_project && ! -L $legacy_config ]] || fail 'A HollowBridge path is a symlink; inspect it before uninstalling.'
     if [[ -e $plugin ]] && ! is_hollowbridge_plugin "$plugin"; then
         fail 'The plugin is not a recognized HollowBridge file; inspect it first.'
     fi
+    stop_legacy_agent
     rm -f -- "$plugin"
     rm -rf -- "$state" "$cache" "$legacy_project" "$legacy_config"
     printf '%s\n' 'HollowBridge removed. Backups and Hollow game data were left in place.'
@@ -73,10 +89,11 @@ if [[ $action == install ]]; then
     check_hollow_backend "$role"
     [[ ! -e $plugin ]] || fail 'HollowBridge plugin already exists. Use ./install.sh update instead.'
     umask 077
+    stop_legacy_agent
     install -d -m 700 "$state"
     install -m 600 "$source_dir/sls-plugin/hollowbridge.lua" "$plugin"
     rm -rf -- "$legacy_project" "$legacy_config" "$cache"
-    printf '%s\n' 'Installed ~/.config/SLSsteam/plugins/hollowbridge.lua. Repeat on the other device, then start Steam.'
+    printf '%s\n' 'Installed ~/.config/SLSsteam/plugins/hollowbridge.lua.'
 else
     [[ $# == 1 ]] || fail 'Usage: ./install.sh update'
     check_hollow_backend auto
@@ -89,6 +106,8 @@ else
     cp -a -- "$plugin" "$backup/hollowbridge.lua"
     [[ ! -d $legacy_project ]] || cp -a -- "$legacy_project" "$backup/project"
     [[ ! -d $legacy_config ]] || cp -a -- "$legacy_config" "$backup/config"
+    [[ ! -f $legacy_unit ]] || cp -a -- "$legacy_unit" "$backup/hollowbridge-steam.service"
+    stop_legacy_agent
     install -d -m 700 "$state"
     install -m 600 "$source_dir/sls-plugin/hollowbridge.lua" "$plugin"
     rm -rf -- "$legacy_project" "$legacy_config" "$cache"

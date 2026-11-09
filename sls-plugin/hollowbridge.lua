@@ -575,6 +575,7 @@ end
 H.origins = H.origins or {}
 H.apps = H.apps or {}
 H.emptySeen = H.emptySeen or {}
+H.knownPackageApps = H.knownPackageApps or {}
 H.activeWorker = H.activeWorker or nil
 H.seededManifests = H.seededManifests or false
 H.stateLoadedDir = H.stateLoadedDir or nil
@@ -692,7 +693,36 @@ local function getLoggedOnUser()
     return user
 end
 
+local function refreshKnownPackageApps()
+    if not SLS or not SLS.config or type(SLS.config.getIntList) ~= "function" then
+        return
+    end
+    local ok, list = pcall(function() return SLS.config:getIntList("AdditionalPackageApps") end)
+    if ok and type(list) == "table" then
+        for _, rawId in ipairs(list) do
+            local appId = tonumber(rawId)
+            if appId and appId > 0 then
+                H.knownPackageApps[appId] = true
+            end
+        end
+    end
+end
+
+local function hasCachedHollowManifest(appId)
+    local home = os.getenv("HOME")
+    if not home or home == "" then return false end
+    local idStr = tostring(appId)
+    return fileExists(home .. "/.config/hollow-desktop/manifests/" .. idStr .. ".lua")
+        or fileExists(home .. "/.config/hollow-desktop/manifests/" .. idStr .. ".zip")
+        or fileExists(home .. "/homebrew/data/hollow-decky/manifests/" .. idStr .. ".lua")
+        or fileExists(home .. "/homebrew/data/hollow-decky/manifests/" .. idStr .. ".zip")
+end
+
 local function isGenuineSubscribed(user, appId)
+    refreshKnownPackageApps()
+    if H.knownPackageApps[appId] or hasCachedHollowManifest(appId) then
+        return false
+    end
     if not user or type(user.isSubscribed) ~= "function" then return false end
     local ok, sub = pcall(function() return user:isSubscribed(appId) end)
     return ok and sub == true
@@ -844,7 +874,7 @@ local function spawnBackgroundWorker(args, statusFile)
     local cleanEnv = "/usr/bin/env -u LD_AUDIT -u LD_PRELOAD -u LD_LIBRARY_PATH "
     local inner = cleanEnv .. shellQuote(pyCmd) .. " " .. shellQuote(workerPath) .. " " .. args
     local hostLauncher = "/usr/bin/steam-runtime-launch-client"
-    if not customCmd and fileExists(hostLauncher) then
+    if not customCmd and fileExists(hostLauncher) and fileExists("/run/host/etc/os-release") then
         inner = cleanEnv .. shellQuote(hostLauncher) .. " --host -- " .. inner
     end
     local logPath = dir .. "/worker.log"
@@ -1003,6 +1033,7 @@ local function step(force)
     H.lastSnapshotsApplied = rpsApplied
 
     loadState()
+    refreshKnownPackageApps()
     pollWorker()
     observeRemoteLibraries()
     local user = getLoggedOnUser()
@@ -1074,6 +1105,7 @@ end
 
 runProtected("startup", function()
     loadState()
+    refreshKnownPackageApps()
     materializeWorker()
     logInfo("HollowBridge plugin loaded")
     if SLS and SLS.steamEngine ~= nil then
