@@ -844,7 +844,7 @@ local function spawnBackgroundWorker(args, statusFile)
     local cleanEnv = "/usr/bin/env -u LD_AUDIT -u LD_PRELOAD -u LD_LIBRARY_PATH "
     local inner = cleanEnv .. shellQuote(pyCmd) .. " " .. shellQuote(workerPath) .. " " .. args
     local hostLauncher = "/usr/bin/steam-runtime-launch-client"
-    if not customCmd and fileExists(hostLauncher) and fileExists("/run/host") then
+    if not customCmd and fileExists(hostLauncher) then
         inner = cleanEnv .. shellQuote(hostLauncher) .. " --host -- " .. inner
     end
     local logPath = dir .. "/worker.log"
@@ -1076,6 +1076,9 @@ runProtected("startup", function()
     loadState()
     materializeWorker()
     logInfo("HollowBridge plugin loaded")
+    if SLS and SLS.steamEngine ~= nil then
+        step(true)
+    end
 end)
 
 if HOLLOWBRIDGE_TEST_MODE then
